@@ -30,6 +30,8 @@ from qiskit.providers import JobStatus
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
 from qiskit_aer import AerSimulator
+from qiskit_aer.noise import NoiseModel
+from qiskit_aer.noise.errors.standard_errors import depolarizing_error
 from qiskit_aer.primitives import SamplerV2
 
 
@@ -714,6 +716,46 @@ class TestSamplerV2(QiskitAerTestCase):
         with self.subTest("set int"):
             sampler = SamplerV2(seed=self._seed)
             self.assertEqual(sampler.seed, self._seed)
+
+    def test_temporal_drift_chunking_and_metadata(self):
+        """Test SamplerV2 temporal drift chunking and trajectory metadata."""
+        qc = QuantumCircuit(1)
+        qc.measure_all()
+
+        noise_model = NoiseModel()
+        noise_model.add_all_qubit_quantum_error(depolarizing_error(0.05, 1), ["id"])
+
+        sampler = SamplerV2(
+            default_shots=9,
+            seed=self._seed,
+            options={
+                "backend_options": {"method": "density_matrix", "noise_model": noise_model},
+                "temporal_drift": {"sigma": 0.2, "window_size": 4},
+            },
+        )
+
+        result = sampler.run([qc], shots=9).result()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].data.meas.num_shots, 9)
+        self.assertEqual(sum(result[0].data.meas.get_counts().values()), 9)
+        self.assertIn("temporal_drift_trajectory", result[0].metadata)
+        self.assertEqual(len(result[0].metadata["temporal_drift_trajectory"]), 3)
+        self.assertEqual(result[0].metadata["temporal_drift"], {"sigma": 0.2, "window_size": 4})
+        self.assertIsInstance(result[0].metadata["simulator_metadata"], list)
+        self.assertEqual(len(result[0].metadata["simulator_metadata"]), 3)
+
+    def test_temporal_drift_disabled_uses_standard_metadata_shape(self):
+        """Test that default SamplerV2 behavior is unchanged when drift is disabled."""
+        qc = QuantumCircuit(1)
+        qc.measure_all()
+        sampler = SamplerV2(default_shots=10, seed=self._seed)
+
+        result = sampler.run([qc], shots=10).result()
+
+        self.assertEqual(result[0].metadata["shots"], 10)
+        self.assertIsInstance(result[0].metadata["simulator_metadata"], dict)
+        self.assertNotIn("temporal_drift_trajectory", result[0].metadata)
 
 
 if __name__ == "__main__":
