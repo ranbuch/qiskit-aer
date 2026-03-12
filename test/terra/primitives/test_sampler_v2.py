@@ -33,6 +33,7 @@ from qiskit_aer import AerSimulator
 from qiskit_aer.noise import NoiseModel
 from qiskit_aer.noise.errors.standard_errors import depolarizing_error
 from qiskit_aer.primitives import SamplerV2
+from qiskit_aer.primitives.sampler_v2 import _perturb_cptp_probabilities
 
 
 class TestSamplerV2(QiskitAerTestCase):
@@ -720,6 +721,7 @@ class TestSamplerV2(QiskitAerTestCase):
     def test_temporal_drift_chunking_and_metadata(self):
         """Test SamplerV2 temporal drift chunking and trajectory metadata."""
         qc = QuantumCircuit(1)
+        qc.id(0)
         qc.measure_all()
 
         noise_model = NoiseModel()
@@ -744,6 +746,7 @@ class TestSamplerV2(QiskitAerTestCase):
         self.assertEqual(result[0].metadata["temporal_drift"], {"sigma": 0.2, "window_size": 4})
         self.assertIsInstance(result[0].metadata["simulator_metadata"], list)
         self.assertEqual(len(result[0].metadata["simulator_metadata"]), 3)
+        self.assertEqual(result[0].metadata["chunk_shots"], [4, 4, 1])
 
     def test_temporal_drift_disabled_uses_standard_metadata_shape(self):
         """Test that default SamplerV2 behavior is unchanged when drift is disabled."""
@@ -756,6 +759,18 @@ class TestSamplerV2(QiskitAerTestCase):
         self.assertEqual(result[0].metadata["shots"], 10)
         self.assertIsInstance(result[0].metadata["simulator_metadata"], dict)
         self.assertNotIn("temporal_drift_trajectory", result[0].metadata)
+
+    def test_temporal_drift_probability_perturbation_preserves_cptp(self):
+        """Temporal drift rescales only error mass and keeps total probability normalized."""
+        probabilities = [0.97, 0.02, 0.01]
+
+        perturbed = _perturb_cptp_probabilities(probabilities, 2.5)
+
+        self.assertAlmostEqual(sum(perturbed), 1.0)
+        self.assertGreaterEqual(perturbed[0], 0.0)
+        self.assertLessEqual(sum(perturbed[1:]), 0.999)
+        self.assertGreater(perturbed[1], probabilities[1])
+        self.assertGreater(perturbed[2], probabilities[2])
 
 
 if __name__ == "__main__":

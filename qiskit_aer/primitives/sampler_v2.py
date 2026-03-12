@@ -16,6 +16,7 @@ Sampler V2 class.
 
 from __future__ import annotations
 
+import copy
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -108,6 +109,7 @@ class SamplerV2(BaseSamplerV2):
         self._options = Options(**options) if options else Options()
         if isinstance(self._options.temporal_drift, dict):
             self._options.temporal_drift = TemporalDriftOptions(**self._options.temporal_drift)
+        self._validate_options()
         self._backend = AerSimulator(**self.options.backend_options)
         self._rng = np.random.default_rng(seed)
 
@@ -135,6 +137,13 @@ class SamplerV2(BaseSamplerV2):
     def options(self) -> Options:
         """Return the options"""
         return self._options
+
+    def _validate_options(self):
+        temporal_drift = self._options.temporal_drift
+        if temporal_drift.sigma < 0:
+            raise ValueError("temporal_drift.sigma must be non-negative")
+        if temporal_drift.window_size is not None and temporal_drift.window_size <= 0:
+            raise ValueError("temporal_drift.window_size must be a positive integer")
 
     def run(
         self, pubs: Iterable[SamplerPubLike], *, shots: int | None = None
@@ -226,14 +235,18 @@ class SamplerV2(BaseSamplerV2):
         if baseline_noise_model is None:
             return None, factor
 
-        perturbed_dict = baseline_noise_model.to_dict(serializable=True)
-        for error in perturbed_dict.get("errors", []):
-            probabilities = error.get("probabilities")
-            if probabilities is None:
-                continue
-            if error.get("type") == "qerror":
-                error["probabilities"] = _perturb_cptp_probabilities(probabilities, factor)
-        return NoiseModel.from_dict(perturbed_dict), factor
+        perturbed_noise_model = copy.deepcopy(baseline_noise_model)
+
+        for name, error in perturbed_noise_model._default_quantum_errors.items():
+            perturbed_noise_model._default_quantum_errors[name] = _perturb_quantum_error(error, factor)
+
+        for name, errors in perturbed_noise_model._local_quantum_errors.items():
+            for qubits, error in errors.items():
+                perturbed_noise_model._local_quantum_errors[name][qubits] = _perturb_quantum_error(
+                    error, factor
+                )
+
+        return perturbed_noise_model, factor
 
     def _stitch_pub_results(
         self, chunk_results: list[SamplerPubResult], total_shots: int
@@ -251,6 +264,7 @@ class SamplerV2(BaseSamplerV2):
         metadata["simulator_metadata"] = [
             result.metadata.get("simulator_metadata", {}) for result in chunk_results
         ]
+        metadata["chunk_shots"] = [result.metadata.get("shots") for result in chunk_results]
         return SamplerPubResult(
             DataBin(**stitched_data, shape=first_result.data.shape),
             metadata=metadata,
@@ -378,3 +392,9 @@ def _perturb_cptp_probabilities(probabilities: list[float], factor: float) -> li
     perturbed[error_indices] = scaled_error_probs
     perturbed[identity_index] = 1.0 - error_mass
     return perturbed.tolist()
+
+
+def _perturb_quantum_error(error, factor: float):
+    """Return a perturbed copy of a quantum error with CPTP-preserving probabilities."""
+    probabilities = _perturb_cptp_probabilities(list(error.probabilities), factor)
+    return error.__class__(zip(error.circuits, probabilities))
